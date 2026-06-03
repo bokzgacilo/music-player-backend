@@ -1,0 +1,15 @@
+services:
+  api:
+    build: .
+    environment:
+      API_PORT: 4000
+      DATABASE_PATH: /app/database/music.db
+      STORAGE_ROOT: /app/storage
+      YTDLP_PATH: yt-dlp
+      FFMPEG_PATH: ffmpeg
+      CORS_ORIGIN: https://your-frontend.vercel.app
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./database:/app/database
+      - ./storage:/app/storage
