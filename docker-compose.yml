@@ -7,7 +7,7 @@ services:
       STORAGE_ROOT: /app/storage
       YTDLP_PATH: yt-dlp
       FFMPEG_PATH: ffmpeg
-      CORS_ORIGIN: https://your-frontend.vercel.app
+      CORS_ORIGIN: https://musicplayer.bokzgacilo.com
     ports:
       - "4000:4000"
     volumes:

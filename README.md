@@ -39,7 +39,7 @@ DATABASE_PATH=/srv/music-app/database/music.db
 STORAGE_ROOT=/srv/music-app/storage
 YTDLP_PATH=yt-dlp
 FFMPEG_PATH=ffmpeg
-CORS_ORIGIN=https://your-frontend.vercel.app
+CORS_ORIGIN=https://musicplayer.bokzgacilo.com
 ```
 
 `STORAGE_ROOT` must contain:
@@ -96,7 +96,7 @@ Run with a process manager such as `systemd`, `pm2`, or Docker. Make sure:
 - `yt-dlp` and `ffmpeg` are installed inside the host/container.
 - `DATABASE_PATH` points to persistent storage.
 - `STORAGE_ROOT` points to persistent storage.
-- `CORS_ORIGIN` contains your Vercel frontend URL.
+- `CORS_ORIGIN` contains your frontend URL, such as `https://musicplayer.bokzgacilo.com`.
 - Your reverse proxy forwards to `API_PORT`.
 
 ## Docker

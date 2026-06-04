@@ -11,7 +11,7 @@ export const config = {
   storageRoot: path.resolve(process.cwd(), process.env.STORAGE_ROOT ?? "./storage"),
   ytdlpPath: process.env.YTDLP_PATH || "yt-dlp",
   ffmpegPath: process.env.FFMPEG_PATH || "ffmpeg",
-  corsOrigins: (process.env.CORS_ORIGIN || "http://localhost:3010")
+  corsOrigins: (process.env.CORS_ORIGIN || "http://localhost:3010,https://musicplayer.bokzgacilo.com")
     .split(",")
     .map((origin) => origin.trim())
     .filter(Boolean),
