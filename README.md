@@ -118,6 +118,8 @@ docker compose up --build
 - `GET /api/search?q=`
 - `POST /api/download`
 - `GET /api/downloads`
+- `WS /api/downloads/stream`
+- `POST /api/downloads/:id/retry`
 - `GET /api/library`
 - `DELETE /api/library/:id`
 - `GET /api/recycle-bin`

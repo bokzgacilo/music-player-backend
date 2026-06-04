@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import { db } from "../db.js";
 import type { DownloadJobRow, DownloadStatus, SongRow } from "../types.js";
+import { broadcastDownloads } from "./downloadEvents.js";
+import type { AuthenticatedClient } from "./sessions.js";
 import { downloadAudio, downloadThumbnail, getVideoInfo } from "./ytdlp.js";
 
 const MAX_ACTIVE_DOWNLOADS = 1;
@@ -16,9 +18,10 @@ function setJob(id: number, status: DownloadStatus, progress?: number, error?: s
     SET status = ?, progress = COALESCE(?, progress), error_message = ?, updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
   `).run(status, progress ?? null, error ?? null, id);
+  broadcastDownloads();
 }
 
-export function createDownloadJob(input: { youtube_id: string; title: string }) {
+export function createDownloadJob(input: { youtube_id: string; title: string; requestedBy: AuthenticatedClient }) {
   const existingSong = db.prepare("SELECT * FROM songs WHERE youtube_id = ?").get(input.youtube_id) as SongRow | undefined;
   if (existingSong) {
     if (existingSong.deleted) {
@@ -31,7 +34,7 @@ export function createDownloadJob(input: { youtube_id: string; title: string }) 
 
   const existingJob = db.prepare(`
     SELECT * FROM download_jobs
-    WHERE youtube_id = ? AND status IN ('queued', 'downloading', 'processing')
+    WHERE youtube_id = ?
     ORDER BY id DESC LIMIT 1
   `).get(input.youtube_id) as DownloadJobRow | undefined;
   if (existingJob) {
@@ -39,10 +42,11 @@ export function createDownloadJob(input: { youtube_id: string; title: string }) 
   }
 
   const result = db.prepare(`
-    INSERT INTO download_jobs (youtube_id, title, status, progress)
-    VALUES (?, ?, 'queued', 0)
-  `).run(input.youtube_id, input.title);
+    INSERT INTO download_jobs (youtube_id, title, status, progress, requested_by_client_id, requested_by_username)
+    VALUES (?, ?, 'queued', 0, ?, ?)
+  `).run(input.youtube_id, input.title, input.requestedBy.id, input.requestedBy.username);
 
+  broadcastDownloads();
   processQueue();
   return { duplicate: false, jobId: Number(result.lastInsertRowid) };
 }
@@ -53,6 +57,37 @@ export function processQueue() {
     if (!job) return;
     runJob(job).catch((error) => log("Unhandled job failure", error));
   }
+}
+
+export function retryDownloadJob(id: number) {
+  const job = db.prepare("SELECT * FROM download_jobs WHERE id = ?").get(id) as DownloadJobRow | undefined;
+  if (!job) {
+    return { status: "not_found" as const };
+  }
+
+  if (job.status !== "failed") {
+    return { status: "not_failed" as const, job };
+  }
+
+  const activeJob = db.prepare(`
+    SELECT * FROM download_jobs
+    WHERE youtube_id = ? AND status IN ('queued', 'downloading', 'processing') AND id != ?
+    ORDER BY id DESC LIMIT 1
+  `).get(job.youtube_id, job.id) as DownloadJobRow | undefined;
+  if (activeJob) {
+    return { status: "already_active" as const, job: activeJob };
+  }
+
+  db.prepare(`
+    UPDATE download_jobs
+    SET status = 'queued', progress = 0, error_message = NULL, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(id);
+
+  const queuedJob = db.prepare("SELECT * FROM download_jobs WHERE id = ?").get(id) as DownloadJobRow;
+  broadcastDownloads();
+  processQueue();
+  return { status: "queued" as const, job: queuedJob };
 }
 
 async function runJob(job: DownloadJobRow) {
@@ -102,15 +137,15 @@ async function runJob(job: DownloadJobRow) {
     const existing = db.prepare("SELECT id FROM songs WHERE youtube_id = ?").get(job.youtube_id) as { id: number } | undefined;
     if (!existing) {
       db.prepare(`
-        INSERT INTO songs (youtube_id, title, artist, duration, file_path, thumbnail_path, source_url, deleted, deleted_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL)
-      `).run(job.youtube_id, info.title, info.artist, info.duration, download.relativePath, thumbnailPath, info.webpage_url);
+        INSERT INTO songs (youtube_id, title, artist, duration, file_path, thumbnail_path, source_url, deleted, deleted_at, downloaded_by_client_id, downloaded_by_username)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)
+      `).run(job.youtube_id, info.title, info.artist, info.duration, download.relativePath, thumbnailPath, info.webpage_url, job.requested_by_client_id, job.requested_by_username);
     } else {
       db.prepare(`
         UPDATE songs
-        SET title = ?, artist = ?, duration = ?, file_path = ?, thumbnail_path = ?, source_url = ?, deleted = 0, deleted_at = NULL
+        SET title = ?, artist = ?, duration = ?, file_path = ?, thumbnail_path = ?, source_url = ?, deleted = 0, deleted_at = NULL, downloaded_by_client_id = ?, downloaded_by_username = ?
         WHERE id = ?
-      `).run(info.title, info.artist, info.duration, download.relativePath, thumbnailPath, info.webpage_url, existing.id);
+      `).run(info.title, info.artist, info.duration, download.relativePath, thumbnailPath, info.webpage_url, job.requested_by_client_id, job.requested_by_username, existing.id);
     }
 
     setJob(job.id, "completed", 100);

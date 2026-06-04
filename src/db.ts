@@ -30,8 +30,12 @@ export function initDb() {
     CREATE TABLE IF NOT EXISTS playlists (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
+      created_by_client_id INTEGER,
+      created_by_username TEXT,
+      is_shared INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (created_by_client_id) REFERENCES client_users(id) ON DELETE SET NULL
     );
 
     CREATE TABLE IF NOT EXISTS playlist_songs (
@@ -52,14 +56,56 @@ export function initDb() {
       status TEXT NOT NULL CHECK(status IN ('queued','downloading','processing','completed','failed')),
       progress REAL NOT NULL DEFAULT 0,
       error_message TEXT,
+      requested_by_client_id INTEGER,
+      requested_by_username TEXT,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (requested_by_client_id) REFERENCES client_users(id) ON DELETE SET NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS client_users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT NOT NULL,
+      avatar_path TEXT NOT NULL DEFAULT '/avatars/lion.png',
+      user_agent TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS client_sessions (
+      token TEXT PRIMARY KEY,
+      user_id INTEGER NOT NULL,
+      user_agent TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES client_users(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS admin_users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT NOT NULL UNIQUE,
+      password TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS admin_sessions (
+      token TEXT PRIMARY KEY,
+      admin_user_id INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (admin_user_id) REFERENCES admin_users(id) ON DELETE CASCADE
     );
 
     CREATE INDEX IF NOT EXISTS idx_playlist_songs_playlist_id ON playlist_songs(playlist_id);
     CREATE INDEX IF NOT EXISTS idx_download_jobs_status ON download_jobs(status);
+    CREATE INDEX IF NOT EXISTS idx_client_sessions_user_id ON client_sessions(user_id);
   `);
   migrateSongsTable();
+  migrateDownloadJobsTable();
+  migratePlaylistsTable();
+  migrateClientUsersTable();
+  seedAdminUser();
   db.prepare("CREATE INDEX IF NOT EXISTS idx_songs_deleted ON songs(deleted)").run();
 }
 
@@ -74,4 +120,59 @@ function migrateSongsTable() {
   if (!columnNames.has("deleted_at")) {
     db.prepare("ALTER TABLE songs ADD COLUMN deleted_at TEXT").run();
   }
+
+  if (!columnNames.has("downloaded_by_client_id")) {
+    db.prepare("ALTER TABLE songs ADD COLUMN downloaded_by_client_id INTEGER REFERENCES client_users(id) ON DELETE SET NULL").run();
+  }
+
+  if (!columnNames.has("downloaded_by_username")) {
+    db.prepare("ALTER TABLE songs ADD COLUMN downloaded_by_username TEXT").run();
+  }
+}
+
+function migrateDownloadJobsTable() {
+  const columns = db.prepare("PRAGMA table_info(download_jobs)").all() as Array<{ name: string }>;
+  const columnNames = new Set(columns.map((column) => column.name));
+
+  if (!columnNames.has("requested_by_client_id")) {
+    db.prepare("ALTER TABLE download_jobs ADD COLUMN requested_by_client_id INTEGER REFERENCES client_users(id) ON DELETE SET NULL").run();
+  }
+
+  if (!columnNames.has("requested_by_username")) {
+    db.prepare("ALTER TABLE download_jobs ADD COLUMN requested_by_username TEXT").run();
+  }
+}
+
+function migratePlaylistsTable() {
+  const columns = db.prepare("PRAGMA table_info(playlists)").all() as Array<{ name: string }>;
+  const columnNames = new Set(columns.map((column) => column.name));
+
+  if (!columnNames.has("created_by_client_id")) {
+    db.prepare("ALTER TABLE playlists ADD COLUMN created_by_client_id INTEGER REFERENCES client_users(id) ON DELETE SET NULL").run();
+  }
+
+  if (!columnNames.has("created_by_username")) {
+    db.prepare("ALTER TABLE playlists ADD COLUMN created_by_username TEXT").run();
+  }
+
+  if (!columnNames.has("is_shared")) {
+    db.prepare("ALTER TABLE playlists ADD COLUMN is_shared INTEGER NOT NULL DEFAULT 0").run();
+  }
+}
+
+function migrateClientUsersTable() {
+  const columns = db.prepare("PRAGMA table_info(client_users)").all() as Array<{ name: string }>;
+  const columnNames = new Set(columns.map((column) => column.name));
+
+  if (!columnNames.has("avatar_path")) {
+    db.prepare("ALTER TABLE client_users ADD COLUMN avatar_path TEXT NOT NULL DEFAULT '/avatars/lion.png'").run();
+  }
+}
+
+function seedAdminUser() {
+  db.prepare(`
+    INSERT INTO admin_users (username, password)
+    VALUES ('bokzgacilo', 'arieljericko')
+    ON CONFLICT(username) DO UPDATE SET password = excluded.password
+  `).run();
 }
