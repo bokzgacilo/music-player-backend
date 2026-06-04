@@ -7,7 +7,7 @@ import type { DownloadJobRow, PlaylistRow, SongRow } from "./types.js";
 import { isValidYoutubeUrl, resolveStoredPath } from "./utils/files.js";
 import { getToolStatus, requireTools } from "./utils/tools.js";
 import { searchYoutube } from "./services/search.js";
-import { listClientUsers, loginAdmin, registerClientFromRequest, requireAdmin, requireClient } from "./services/sessions.js";
+import { getAdminFromToken, getClientFromToken, listClientUsers, loginAdmin, registerClientFromRequest, requireAdmin, requireClient } from "./services/sessions.js";
 
 export const router = express.Router();
 
@@ -26,6 +26,28 @@ const clientSessionSchema = z.object({
   avatarPath: z.enum(avatarPaths)
 });
 const adminLoginSchema = z.object({ username: z.string().min(1), password: z.string().min(1) });
+
+const publicApiRoutes = new Set([
+  "POST /clients/session",
+  "POST /admin/login"
+]);
+const adminApiRoutePrefixes = ["/admin", "/tools", "/recycle-bin"];
+
+router.use((req, res, next) => {
+  if (req.method === "OPTIONS") return next();
+  if (publicApiRoutes.has(`${req.method.toUpperCase()} ${req.path}`)) return next();
+
+  const needsAdmin = adminApiRoutePrefixes.some((prefix) => req.path === prefix || req.path.startsWith(`${prefix}/`));
+  if (needsAdmin) {
+    const admin = getAdminFromToken(req.header("x-admin-session"));
+    if (!admin) return res.status(401).json({ error: "Admin session required" });
+    return next();
+  }
+
+  const client = getClientFromToken(req.header("x-client-session"));
+  if (!client) return res.status(401).json({ error: "Client session required" });
+  return next();
+});
 
 router.get("/health", (_req, res) => {
   const tools = getToolStatus();
@@ -126,9 +148,36 @@ router.post("/downloads/:id/retry", (req, res) => {
   res.json({ job: result.job });
 });
 
-router.get("/library", (_req, res) => {
-  const songs = db.prepare("SELECT * FROM songs WHERE deleted = 0 ORDER BY downloaded_at DESC").all() as SongRow[];
-  res.json({ songs });
+router.get("/library", (req, res) => {
+  const client = requireClient(req);
+  const songs = db.prepare(`
+    SELECT songs.*, client_users.avatar_path AS downloaded_by_avatar_path
+    FROM songs
+    LEFT JOIN client_users ON client_users.id = songs.downloaded_by_client_id
+    WHERE songs.deleted = 0
+    ORDER BY songs.downloaded_at DESC
+  `).all() as Array<SongRow & { downloaded_by_avatar_path: string | null }>;
+  const memberships = db.prepare(`
+    SELECT playlist_songs.song_id, playlists.id, playlists.name
+    FROM playlist_songs
+    JOIN playlists ON playlists.id = playlist_songs.playlist_id
+    WHERE playlists.created_by_client_id = ?
+  `).all(client.id) as Array<{ song_id: number; id: number; name: string }>;
+  const playlistBySong = new Map<number, Array<{ id: number; name: string }>>();
+  for (const membership of memberships) {
+    const current = playlistBySong.get(membership.song_id) ?? [];
+    current.push({ id: membership.id, name: membership.name });
+    playlistBySong.set(membership.song_id, current);
+  }
+  const songsWithPlaylists = songs.map((song) => {
+    const songPlaylists = playlistBySong.get(song.id) ?? [];
+    return {
+      ...song,
+      playlist_ids: songPlaylists.map((playlist) => playlist.id),
+      playlist_names: songPlaylists.map((playlist) => playlist.name)
+    };
+  });
+  res.json({ songs: songsWithPlaylists });
 });
 
 router.get("/library/:id", (req, res) => {
