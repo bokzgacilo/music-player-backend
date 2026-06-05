@@ -122,8 +122,7 @@ docker compose up --build
 - `POST /api/downloads/:id/retry`
 - `GET /api/library`
 - `DELETE /api/library/:id`
-- `GET /api/recycle-bin`
-- `POST /api/recycle-bin/:id/restore`
+- `DELETE /api/admin/songs/:id`
 - `GET /api/stream/:songId`
 - `GET /api/playlists`
 - `POST /api/playlists`

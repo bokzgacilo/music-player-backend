@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { config } from "../config.js";
 import { db } from "../db.js";
 import type { DownloadJobRow } from "../types.js";
+import { serverTimestamp } from "../utils/time.js";
 import { getAdminFromToken, getClientFromToken } from "./sessions.js";
 
 const APP_STREAM_PATH = "/api/stream";
@@ -23,6 +24,17 @@ type ClientRecord = {
   username: string;
   avatarPath: string;
   isAdmin: boolean;
+  nowPlaying: NowPlaying | null;
+};
+
+type NowPlaying = {
+  songId: number;
+  title: string;
+  artist: string;
+  position: number;
+  duration: number | null;
+  playing: boolean;
+  reportedAt: string;
 };
 
 const clients = new Map<WebSocket, ClientRecord>();
@@ -82,8 +94,8 @@ function createClientRecord(request: IncomingMessage): ClientRecord | null {
 
   return {
     id: randomUUID(),
-    connectedAt: new Date().toISOString(),
-    lastSeenAt: new Date().toISOString(),
+    connectedAt: serverTimestamp(),
+    lastSeenAt: serverTimestamp(),
     userAgent: client.userAgent || request.headers["user-agent"] || "unknown",
     ipAddress: getIpAddress(request),
     origin: request.headers.origin || null,
@@ -91,7 +103,8 @@ function createClientRecord(request: IncomingMessage): ClientRecord | null {
     userId: client.id,
     username: client.username,
     avatarPath: client.avatarPath,
-    isAdmin: Boolean(admin)
+    isAdmin: Boolean(admin),
+    nowPlaying: null
   };
 }
 
@@ -128,11 +141,34 @@ export function setupDownloadWebSocket(server: Server) {
       const record = clients.get(client);
       if (!record) return;
 
-      record.lastSeenAt = new Date().toISOString();
+      record.lastSeenAt = serverTimestamp();
       try {
-        const payload = JSON.parse(data.toString()) as { type?: string; path?: string };
+        const payload = JSON.parse(data.toString()) as {
+          type?: string;
+          path?: string;
+          song?: { id?: number; title?: string; artist?: string } | null;
+          position?: number;
+          duration?: number | null;
+          playing?: boolean;
+        };
         if (payload.type === "client:update") {
           record.path = payload.path || null;
+          broadcastClients();
+        }
+        if (payload.type === "player:update") {
+          if (payload.song?.id && payload.song.title) {
+            record.nowPlaying = {
+              songId: payload.song.id,
+              title: payload.song.title,
+              artist: payload.song.artist || "Unknown",
+              position: Math.max(0, Number(payload.position ?? 0)),
+              duration: typeof payload.duration === "number" ? Math.max(0, payload.duration) : null,
+              playing: Boolean(payload.playing),
+              reportedAt: serverTimestamp()
+            };
+          } else {
+            record.nowPlaying = null;
+          }
           broadcastClients();
         }
       } catch {

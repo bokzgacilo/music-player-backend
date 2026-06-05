@@ -1,7 +1,9 @@
 import path from "node:path";
 import dotenv from "dotenv";
+import { serverTimeZone } from "./utils/time.js";
 
 dotenv.config();
+process.env.TZ = process.env.TZ || serverTimeZone;
 
 const root = process.cwd();
 
@@ -11,6 +13,7 @@ export const config = {
   storageRoot: path.resolve(process.cwd(), process.env.STORAGE_ROOT ?? "./storage"),
   ytdlpPath: process.env.YTDLP_PATH || "yt-dlp",
   ffmpegPath: process.env.FFMPEG_PATH || "ffmpeg",
+  timeZone: process.env.TZ,
   corsOrigins: (process.env.CORS_ORIGIN || "http://localhost:3010,https://musicplayer.bokzgacilo.com")
     .split(",")
     .map((origin) => origin.trim())

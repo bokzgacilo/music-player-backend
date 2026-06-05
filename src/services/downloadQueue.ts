@@ -4,8 +4,9 @@ import type { DownloadJobRow, DownloadStatus, SongRow } from "../types.js";
 import { broadcastDownloads } from "./downloadEvents.js";
 import type { AuthenticatedClient } from "./sessions.js";
 import { downloadAudio, downloadThumbnail, getVideoInfo } from "./ytdlp.js";
+import { sqliteNow } from "../utils/time.js";
 
-const MAX_ACTIVE_DOWNLOADS = 1;
+const MAX_ACTIVE_DOWNLOADS = 3;
 let activeDownloads = 0;
 
 function log(message: string, meta?: unknown) {
@@ -15,7 +16,7 @@ function log(message: string, meta?: unknown) {
 function setJob(id: number, status: DownloadStatus, progress?: number, error?: string) {
   db.prepare(`
     UPDATE download_jobs
-    SET status = ?, progress = COALESCE(?, progress), error_message = ?, updated_at = CURRENT_TIMESTAMP
+    SET status = ?, progress = COALESCE(?, progress), error_message = ?, updated_at = ${sqliteNow}
     WHERE id = ?
   `).run(status, progress ?? null, error ?? null, id);
   broadcastDownloads();
@@ -42,8 +43,8 @@ export function createDownloadJob(input: { youtube_id: string; title: string; re
   }
 
   const result = db.prepare(`
-    INSERT INTO download_jobs (youtube_id, title, status, progress, requested_by_client_id, requested_by_username)
-    VALUES (?, ?, 'queued', 0, ?, ?)
+    INSERT INTO download_jobs (youtube_id, title, status, progress, requested_by_client_id, requested_by_username, created_at, updated_at)
+    VALUES (?, ?, 'queued', 0, ?, ?, ${sqliteNow}, ${sqliteNow})
   `).run(input.youtube_id, input.title, input.requestedBy.id, input.requestedBy.username);
 
   broadcastDownloads();
@@ -80,7 +81,7 @@ export function retryDownloadJob(id: number) {
 
   db.prepare(`
     UPDATE download_jobs
-    SET status = 'queued', progress = 0, error_message = NULL, updated_at = CURRENT_TIMESTAMP
+    SET status = 'queued', progress = 0, error_message = NULL, updated_at = ${sqliteNow}
     WHERE id = ?
   `).run(id);
 
@@ -137,8 +138,8 @@ async function runJob(job: DownloadJobRow) {
     const existing = db.prepare("SELECT id FROM songs WHERE youtube_id = ?").get(job.youtube_id) as { id: number } | undefined;
     if (!existing) {
       db.prepare(`
-        INSERT INTO songs (youtube_id, title, artist, duration, file_path, thumbnail_path, source_url, deleted, deleted_at, downloaded_by_client_id, downloaded_by_username)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)
+        INSERT INTO songs (youtube_id, title, artist, duration, file_path, thumbnail_path, source_url, deleted, deleted_at, downloaded_by_client_id, downloaded_by_username, downloaded_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?, ${sqliteNow})
       `).run(job.youtube_id, info.title, info.artist, info.duration, download.relativePath, thumbnailPath, info.webpage_url, job.requested_by_client_id, job.requested_by_username);
     } else {
       db.prepare(`

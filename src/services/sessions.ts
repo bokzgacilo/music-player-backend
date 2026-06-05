@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import type { Request } from "express";
 import { db } from "../db.js";
 import type { AdminSessionRow, ClientSessionRow, ClientUserRow } from "../types.js";
+import { sqliteNow } from "../utils/time.js";
 
 export type AuthenticatedClient = {
   id: number;
@@ -24,13 +25,16 @@ export function createClientSession(input: { username: string; avatarPath: strin
   const avatarPath = input.avatarPath;
   const userAgent = input.userAgent || "unknown";
   const result = db.prepare(`
-    INSERT INTO client_users (username, avatar_path, user_agent)
-    VALUES (?, ?, ?)
+    INSERT INTO client_users (username, avatar_path, user_agent, created_at, updated_at, last_seen_at)
+    VALUES (?, ?, ?, ${sqliteNow}, ${sqliteNow}, ${sqliteNow})
   `).run(username, avatarPath, userAgent);
 
   const user = db.prepare("SELECT * FROM client_users WHERE id = ?").get(result.lastInsertRowid) as ClientUserRow;
   const token = createToken();
-  db.prepare("INSERT INTO client_sessions (token, user_id, user_agent) VALUES (?, ?, ?)").run(token, user.id, userAgent);
+  db.prepare(`
+    INSERT INTO client_sessions (token, user_id, user_agent, created_at, last_seen_at)
+    VALUES (?, ?, ?, ${sqliteNow}, ${sqliteNow})
+  `).run(token, user.id, userAgent);
 
   return { token, user };
 }
@@ -46,8 +50,8 @@ export function getClientFromToken(token: string | undefined): AuthenticatedClie
 
   if (!row) return null;
 
-  db.prepare("UPDATE client_sessions SET last_seen_at = CURRENT_TIMESTAMP WHERE token = ?").run(token);
-  db.prepare("UPDATE client_users SET last_seen_at = CURRENT_TIMESTAMP WHERE id = ?").run(row.id);
+  db.prepare(`UPDATE client_sessions SET last_seen_at = ${sqliteNow} WHERE token = ?`).run(token);
+  db.prepare(`UPDATE client_users SET last_seen_at = ${sqliteNow} WHERE id = ?`).run(row.id);
 
   return {
     id: row.id,
@@ -74,7 +78,10 @@ export function loginAdmin(input: { username: string; password: string }) {
   if (!admin) return null;
 
   const token = createToken();
-  db.prepare("INSERT INTO admin_sessions (token, admin_user_id) VALUES (?, ?)").run(token, admin.id);
+  db.prepare(`
+    INSERT INTO admin_sessions (token, admin_user_id, created_at, last_seen_at)
+    VALUES (?, ?, ${sqliteNow}, ${sqliteNow})
+  `).run(token, admin.id);
   return { token, username: input.username };
 }
 
@@ -82,7 +89,7 @@ export function getAdminFromToken(token: string | undefined) {
   if (!token) return null;
   const session = db.prepare("SELECT * FROM admin_sessions WHERE token = ?").get(token) as AdminSessionRow | undefined;
   if (!session) return null;
-  db.prepare("UPDATE admin_sessions SET last_seen_at = CURRENT_TIMESTAMP WHERE token = ?").run(token);
+  db.prepare(`UPDATE admin_sessions SET last_seen_at = ${sqliteNow} WHERE token = ?`).run(token);
   return session;
 }
 

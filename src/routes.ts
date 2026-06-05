@@ -5,6 +5,7 @@ import { db } from "./db.js";
 import { createDownloadJob, retryDownloadJob } from "./services/downloadQueue.js";
 import type { DownloadJobRow, PlaylistRow, SongRow } from "./types.js";
 import { isValidYoutubeUrl, resolveStoredPath } from "./utils/files.js";
+import { sqliteNow } from "./utils/time.js";
 import { getToolStatus, requireTools } from "./utils/tools.js";
 import { searchYoutube } from "./services/search.js";
 import { getAdminFromToken, getClientFromToken, listClientUsers, loginAdmin, registerClientFromRequest, requireAdmin, requireClient } from "./services/sessions.js";
@@ -20,6 +21,15 @@ const downloadSchema = z.object({
 const playlistSchema = z.object({ name: z.string().min(1).max(120) });
 const playlistShareSchema = z.object({ is_shared: z.boolean() });
 const playlistSongSchema = z.object({ songId: z.number().int().positive(), position: z.number().int().nonnegative().optional() });
+const libraryQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(64).default(32),
+  offset: z.coerce.number().int().min(0).default(0),
+  q: z.string().trim().optional()
+});
+const downloadsQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(5).max(100).default(10)
+});
 const avatarPaths = ["/avatars/lion.png", "/avatars/bunny.png", "/avatars/panda.png"] as const;
 const clientSessionSchema = z.object({
   username: z.string().trim().min(1).max(80),
@@ -31,7 +41,7 @@ const publicApiRoutes = new Set([
   "POST /clients/session",
   "POST /admin/login"
 ]);
-const adminApiRoutePrefixes = ["/admin", "/tools", "/recycle-bin"];
+const adminApiRoutePrefixes = ["/admin", "/tools"];
 
 router.use((req, res, next) => {
   if (req.method === "OPTIONS") return next();
@@ -59,6 +69,23 @@ router.get("/tools", (req, res) => {
   const tools = getToolStatus();
   res.json({ tools });
 });
+
+function storedSongFiles(song: Pick<SongRow, "file_path" | "thumbnail_path">) {
+  return [song.file_path, song.thumbnail_path]
+    .filter((filePath): filePath is string => Boolean(filePath))
+    .map((filePath) => resolveStoredPath(filePath));
+}
+
+function permanentlyDeleteSong(song: SongRow) {
+  const files = storedSongFiles(song);
+  db.transaction(() => {
+    db.prepare("DELETE FROM playlist_songs WHERE song_id = ?").run(song.id);
+    db.prepare("DELETE FROM songs WHERE id = ?").run(song.id);
+  })();
+  for (const filePath of files) {
+    fs.rmSync(filePath, { force: true });
+  }
+}
 
 router.post("/clients/session", (req, res) => {
   const body = clientSessionSchema.parse(req.body);
@@ -125,8 +152,65 @@ router.post("/download", (req, res, next) => {
 });
 
 router.get("/downloads", (_req, res) => {
-  const jobs = db.prepare("SELECT * FROM download_jobs ORDER BY id DESC LIMIT 100").all() as DownloadJobRow[];
-  res.json({ jobs });
+  const query = downloadsQuerySchema.parse(_req.query);
+  const offset = (query.page - 1) * query.pageSize;
+  const rows = db.prepare(`
+    SELECT
+      download_jobs.*,
+      songs.file_path AS song_file_path,
+      songs.duration AS song_duration
+    FROM download_jobs
+    LEFT JOIN songs ON songs.youtube_id = download_jobs.youtube_id
+    ORDER BY download_jobs.id DESC
+    LIMIT ? OFFSET ?
+  `).all(query.pageSize, offset) as Array<DownloadJobRow & { song_file_path: string | null; song_duration: number | null }>;
+  const total = (db.prepare("SELECT COUNT(*) AS value FROM download_jobs").get() as { value: number }).value;
+  const statusCounts = db.prepare(`
+    SELECT status, COUNT(*) AS count
+    FROM download_jobs
+    GROUP BY status
+  `).all() as Array<{ status: DownloadJobRow["status"]; count: number }>;
+  const summary = {
+    queued: 0,
+    active: 0,
+    completed: 0,
+    failed: 0
+  };
+  for (const statusCount of statusCounts) {
+    if (statusCount.status === "queued") summary.queued += statusCount.count;
+    if (statusCount.status === "downloading" || statusCount.status === "processing") summary.active += statusCount.count;
+    if (statusCount.status === "completed") summary.completed += statusCount.count;
+    if (statusCount.status === "failed") summary.failed += statusCount.count;
+  }
+  const jobs = rows.map((row) => {
+    let fileSizeBytes: number | null = null;
+    if (row.song_file_path) {
+      try {
+        fileSizeBytes = fs.statSync(resolveStoredPath(row.song_file_path)).size;
+      } catch {
+        fileSizeBytes = null;
+      }
+    }
+    const bitrateKbps = fileSizeBytes && row.song_duration ? Math.round((fileSizeBytes * 8) / row.song_duration / 1000) : null;
+    const elapsedSeconds = db.prepare(`
+      SELECT ROUND((julianday(CASE WHEN ? IN ('queued', 'downloading', 'processing') THEN ${sqliteNow} ELSE ? END) - julianday(?)) * 86400) AS value
+    `).get(row.status, row.updated_at, row.created_at) as { value: number | null };
+    const { song_file_path: _songFilePath, song_duration: _songDuration, ...job } = row;
+    return {
+      ...job,
+      downloadDurationSeconds: elapsedSeconds.value ?? null,
+      fileSizeBytes,
+      bitrateKbps
+    };
+  });
+  res.json({
+    jobs,
+    page: query.page,
+    pageSize: query.pageSize,
+    total,
+    totalPages: Math.max(1, Math.ceil(total / query.pageSize)),
+    summary
+  });
 });
 
 router.post("/downloads/:id/retry", (req, res) => {
@@ -150,19 +234,34 @@ router.post("/downloads/:id/retry", (req, res) => {
 
 router.get("/library", (req, res) => {
   const client = requireClient(req);
-  const songs = db.prepare(`
+  const query = libraryQuerySchema.parse(req.query);
+  const search = query.q ? `%${query.q}%` : null;
+  const filters = ["songs.deleted = 0"];
+  const params: Array<string | number> = [];
+
+  if (search) {
+    filters.push("(songs.title LIKE ? OR songs.artist LIKE ? OR songs.downloaded_by_username LIKE ?)");
+    params.push(search, search, search);
+  }
+
+  const rows = db.prepare(`
     SELECT songs.*, client_users.avatar_path AS downloaded_by_avatar_path
     FROM songs
     LEFT JOIN client_users ON client_users.id = songs.downloaded_by_client_id
-    WHERE songs.deleted = 0
+    WHERE ${filters.join(" AND ")}
     ORDER BY songs.downloaded_at DESC
-  `).all() as Array<SongRow & { downloaded_by_avatar_path: string | null }>;
-  const memberships = db.prepare(`
+    LIMIT ? OFFSET ?
+  `).all(...params, query.limit + 1, query.offset) as Array<SongRow & { downloaded_by_avatar_path: string | null }>;
+  const hasMore = rows.length > query.limit;
+  const songs = rows.slice(0, query.limit);
+  const songIds = songs.map((song) => song.id);
+  const memberships = songIds.length ? db.prepare(`
     SELECT playlist_songs.song_id, playlists.id, playlists.name
     FROM playlist_songs
     JOIN playlists ON playlists.id = playlist_songs.playlist_id
     WHERE playlists.created_by_client_id = ?
-  `).all(client.id) as Array<{ song_id: number; id: number; name: string }>;
+      AND playlist_songs.song_id IN (${songIds.map(() => "?").join(",")})
+  `).all(client.id, ...songIds) as Array<{ song_id: number; id: number; name: string }> : [];
   const playlistBySong = new Map<number, Array<{ id: number; name: string }>>();
   for (const membership of memberships) {
     const current = playlistBySong.get(membership.song_id) ?? [];
@@ -177,7 +276,7 @@ router.get("/library", (req, res) => {
       playlist_names: songPlaylists.map((playlist) => playlist.name)
     };
   });
-  res.json({ songs: songsWithPlaylists });
+  res.json({ songs: songsWithPlaylists, hasMore, nextOffset: query.offset + songs.length });
 });
 
 router.get("/library/:id", (req, res) => {
@@ -190,31 +289,24 @@ router.get("/library/:id", (req, res) => {
 router.delete("/library/:id", (req, res) => {
   const client = requireClient(req);
   const id = idSchema.parse(req.params.id);
-  const song = db.prepare("SELECT * FROM songs WHERE id = ? AND deleted = 0").get(id) as SongRow | undefined;
+  const song = db.prepare("SELECT * FROM songs WHERE id = ?").get(id) as SongRow | undefined;
   if (!song) return res.status(404).json({ error: "Song not found" });
   if (song.downloaded_by_client_id !== client.id) {
     return res.status(403).json({ error: "Only the user who added this song can remove it" });
   }
 
-  db.prepare("UPDATE songs SET deleted = 1, deleted_at = CURRENT_TIMESTAMP WHERE id = ?").run(id);
+  permanentlyDeleteSong(song);
   res.json({ ok: true });
 });
 
-router.get("/recycle-bin", (req, res) => {
-  requireAdmin(req);
-  const songs = db.prepare("SELECT * FROM songs WHERE deleted = 1 ORDER BY deleted_at DESC, downloaded_at DESC").all() as SongRow[];
-  res.json({ songs });
-});
-
-router.post("/recycle-bin/:id/restore", (req, res) => {
+router.delete("/admin/songs/:id", (req, res) => {
   requireAdmin(req);
   const id = idSchema.parse(req.params.id);
-  const song = db.prepare("SELECT * FROM songs WHERE id = ? AND deleted = 1").get(id) as SongRow | undefined;
-  if (!song) return res.status(404).json({ error: "Deleted song not found" });
+  const song = db.prepare("SELECT * FROM songs WHERE id = ?").get(id) as SongRow | undefined;
+  if (!song) return res.status(404).json({ error: "Song not found" });
 
-  db.prepare("UPDATE songs SET deleted = 0, deleted_at = NULL WHERE id = ?").run(id);
-  const restored = db.prepare("SELECT * FROM songs WHERE id = ?").get(id) as SongRow;
-  res.json({ song: restored });
+  permanentlyDeleteSong(song);
+  res.json({ ok: true });
 });
 
 router.get("/stream/:songId", (req, res) => {
@@ -271,8 +363,8 @@ router.post("/playlists", (req, res) => {
   const client = requireClient(req);
   const body = playlistSchema.parse(req.body);
   const result = db.prepare(`
-    INSERT INTO playlists (name, created_by_client_id, created_by_username)
-    VALUES (?, ?, ?)
+    INSERT INTO playlists (name, created_by_client_id, created_by_username, created_at, updated_at)
+    VALUES (?, ?, ?, ${sqliteNow}, ${sqliteNow})
   `).run(body.name, client.id, client.username);
   const playlist = db.prepare("SELECT * FROM playlists WHERE id = ?").get(result.lastInsertRowid);
   res.status(201).json({ playlist });
@@ -282,7 +374,7 @@ router.put("/playlists/:id", (req, res) => {
   const client = requireClient(req);
   const id = idSchema.parse(req.params.id);
   const body = playlistSchema.parse(req.body);
-  db.prepare("UPDATE playlists SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND created_by_client_id = ?").run(body.name, id, client.id);
+  db.prepare(`UPDATE playlists SET name = ?, updated_at = ${sqliteNow} WHERE id = ? AND created_by_client_id = ?`).run(body.name, id, client.id);
   const playlist = db.prepare("SELECT * FROM playlists WHERE id = ? AND created_by_client_id = ?").get(id, client.id);
   if (!playlist) return res.status(404).json({ error: "Playlist not found" });
   res.json({ playlist });
@@ -292,7 +384,7 @@ router.put("/playlists/:id/share", (req, res) => {
   const client = requireClient(req);
   const id = idSchema.parse(req.params.id);
   const body = playlistShareSchema.parse(req.body);
-  db.prepare("UPDATE playlists SET is_shared = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND created_by_client_id = ?").run(body.is_shared ? 1 : 0, id, client.id);
+  db.prepare(`UPDATE playlists SET is_shared = ?, updated_at = ${sqliteNow} WHERE id = ? AND created_by_client_id = ?`).run(body.is_shared ? 1 : 0, id, client.id);
   const playlist = db.prepare("SELECT * FROM playlists WHERE id = ? AND created_by_client_id = ?").get(id, client.id);
   if (!playlist) return res.status(404).json({ error: "Playlist not found" });
   res.json({ playlist });
@@ -329,10 +421,10 @@ router.post("/playlists/:id/songs", (req, res) => {
   if (!song) return res.status(404).json({ error: "Song not found" });
   const maxPosition = db.prepare("SELECT COALESCE(MAX(position), -1) as value FROM playlist_songs WHERE playlist_id = ?").get(playlistId) as { value: number };
   db.prepare(`
-    INSERT OR IGNORE INTO playlist_songs (playlist_id, song_id, position)
-    VALUES (?, ?, ?)
+    INSERT OR IGNORE INTO playlist_songs (playlist_id, song_id, position, created_at)
+    VALUES (?, ?, ?, ${sqliteNow})
   `).run(playlistId, body.songId, body.position ?? maxPosition.value + 1);
-  db.prepare("UPDATE playlists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(playlistId);
+  db.prepare(`UPDATE playlists SET updated_at = ${sqliteNow} WHERE id = ?`).run(playlistId);
   res.status(201).json({ ok: true });
 });
 
@@ -343,6 +435,6 @@ router.delete("/playlists/:id/songs/:songId", (req, res) => {
   const playlist = db.prepare("SELECT id FROM playlists WHERE id = ? AND created_by_client_id = ?").get(playlistId, client.id);
   if (!playlist) return res.status(404).json({ error: "Playlist not found" });
   db.prepare("DELETE FROM playlist_songs WHERE playlist_id = ? AND song_id = ?").run(playlistId, songId);
-  db.prepare("UPDATE playlists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(playlistId);
+  db.prepare(`UPDATE playlists SET updated_at = ${sqliteNow} WHERE id = ?`).run(playlistId);
   res.status(204).end();
 });

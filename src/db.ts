@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { config } from "./config.js";
+import { sqliteNow } from "./utils/time.js";
 
 fs.mkdirSync(path.dirname(config.databasePath), { recursive: true });
 
@@ -22,7 +23,7 @@ export function initDb() {
       source_url TEXT NOT NULL,
       play_count INTEGER NOT NULL DEFAULT 0,
       favorite INTEGER NOT NULL DEFAULT 0,
-      downloaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      downloaded_at TEXT NOT NULL DEFAULT (${sqliteNow}),
       deleted INTEGER NOT NULL DEFAULT 0,
       deleted_at TEXT
     );
@@ -33,8 +34,8 @@ export function initDb() {
       created_by_client_id INTEGER,
       created_by_username TEXT,
       is_shared INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      created_at TEXT NOT NULL DEFAULT (${sqliteNow}),
+      updated_at TEXT NOT NULL DEFAULT (${sqliteNow}),
       FOREIGN KEY (created_by_client_id) REFERENCES client_users(id) ON DELETE SET NULL
     );
 
@@ -43,7 +44,7 @@ export function initDb() {
       playlist_id INTEGER NOT NULL,
       song_id INTEGER NOT NULL,
       position INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      created_at TEXT NOT NULL DEFAULT (${sqliteNow}),
       UNIQUE(playlist_id, song_id),
       FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE,
       FOREIGN KEY (song_id) REFERENCES songs(id) ON DELETE CASCADE
@@ -58,8 +59,8 @@ export function initDb() {
       error_message TEXT,
       requested_by_client_id INTEGER,
       requested_by_username TEXT,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      created_at TEXT NOT NULL DEFAULT (${sqliteNow}),
+      updated_at TEXT NOT NULL DEFAULT (${sqliteNow}),
       FOREIGN KEY (requested_by_client_id) REFERENCES client_users(id) ON DELETE SET NULL
     );
 
@@ -68,17 +69,17 @@ export function initDb() {
       username TEXT NOT NULL,
       avatar_path TEXT NOT NULL DEFAULT '/avatars/lion.png',
       user_agent TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      created_at TEXT NOT NULL DEFAULT (${sqliteNow}),
+      updated_at TEXT NOT NULL DEFAULT (${sqliteNow}),
+      last_seen_at TEXT NOT NULL DEFAULT (${sqliteNow})
     );
 
     CREATE TABLE IF NOT EXISTS client_sessions (
       token TEXT PRIMARY KEY,
       user_id INTEGER NOT NULL,
       user_agent TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      created_at TEXT NOT NULL DEFAULT (${sqliteNow}),
+      last_seen_at TEXT NOT NULL DEFAULT (${sqliteNow}),
       FOREIGN KEY (user_id) REFERENCES client_users(id) ON DELETE CASCADE
     );
 
@@ -86,14 +87,14 @@ export function initDb() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       username TEXT NOT NULL UNIQUE,
       password TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      created_at TEXT NOT NULL DEFAULT (${sqliteNow})
     );
 
     CREATE TABLE IF NOT EXISTS admin_sessions (
       token TEXT PRIMARY KEY,
       admin_user_id INTEGER NOT NULL,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      created_at TEXT NOT NULL DEFAULT (${sqliteNow}),
+      last_seen_at TEXT NOT NULL DEFAULT (${sqliteNow}),
       FOREIGN KEY (admin_user_id) REFERENCES admin_users(id) ON DELETE CASCADE
     );
 
